@@ -1,22 +1,28 @@
 #include "cuquanpath.h"
 
-void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numThreads, int numHighQubits, int numLowQubits)
+void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numBlocks, int numHighQubits, int numLowQubits)
 {
 
     // 为设备分配状态向量的内存空间
     Matrix<DTYPE> *deviceSv;
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(deviceSv, hostSv));
+
+    // auto start = chrono::high_resolution_clock::now();
     // Step 1. Calculate the high-order operation matrix in cpu
     Matrix<DTYPE> Opmat = highOMSim(qc, numHighQubits);
 
-    // auto start = chrono::high_resolution_clock::now();
     // Step 2. Local SVSim for gates on low-order qubits
     Matrix<DTYPE> *deviceGm;
     Matrix<DTYPE> gateMatrix = Matrix<DTYPE>(4, 4);
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(deviceGm, gateMatrix));
 
-    int threadPerBlock = 256;
-    int blockPerGrid = (hostSv.row + threadPerBlock - 1) / threadPerBlock;
+    // int threadPerBlock = 256;
+    // int blockPerGrid = (hostSv.row + threadPerBlock - 1) / threadPerBlock;
+    int threadPerBlock = (hostSv.row + numBlocks - 1) / numBlocks;
+    int blockPerGrid = numBlocks;
+    threadPerBlock = threadPerBlock < 16 ? 16 : threadPerBlock;
+    threadPerBlock = threadPerBlock > 1024 ? 1024 : threadPerBlock;
+
     for (int lev = 0; lev < qc.numDepths; ++lev)
     {
         for (int qid = 0; qid < numLowQubits; ++qid)
@@ -42,31 +48,34 @@ void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numThreads, int numHighQu
             }
         }
     }
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::copyDeviceToHost(deviceSv, hostSv));
+
+    cudaDeviceSynchronize();
+
+    // HANDLE_CUDA_ERROR(Matrix<DTYPE>::copyDeviceToHost(deviceSv, hostSv));
 
     // 释放设备内存
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(deviceSv));
+    // HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(deviceSv));
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(deviceGm));
-
-    // auto end = chrono::high_resolution_clock::now();
-
-    // chrono::duration<double> duration = end - start;
-    // cout << "Svsim simulation completed in " << duration.count() << " seconds." << endl;
 
     // Step 3. Final merge that requires communication
     // dim3 mergegrid(1);
     // dim3 mergeblock(hostSv.row / numThreads, numThreads);
 
     Matrix<DTYPE> *ptrOpmat;
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(deviceSv, hostSv));
+    // HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(deviceSv, hostSv));
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(ptrOpmat, Opmat));
 
-    merge<<<blockPerGrid, threadPerBlock>>>(deviceSv, ptrOpmat);
+    merge<<<blockPerGrid, 128>>>(deviceSv, ptrOpmat);
+    // auto end = chrono::high_resolution_clock::now();
+    cudaDeviceSynchronize();
 
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::copyDeviceToHost(deviceSv, hostSv));
 
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(deviceSv));
     HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(ptrOpmat));
+
+    // chrono::duration<double> duration = end - start;
+    // cout << "Svsim simulation completed in " << duration.count() << " seconds." << endl;
     hostSv.writeToTextFile("sv.txt");
 }
 
@@ -123,19 +132,51 @@ Matrix<DTYPE> highOMSim(QCircuit &qc, int numHighQubits)
  * @param numLowQubits the number of low-order qubits
  * @param qidx the index of target qubit
  */
+// __global__ void SVSimForSingleQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Matrix<DTYPE> *localSv, int qidx)
+// {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     int i = (idx / (1 << qidx)) * (1 << (qidx + 1));
+//     int j = idx % (1 << qidx);
+//     int p = i | j;
+//     // 将 gateMatrix 加载到共享内存
+//     __shared__ DTYPE sharedGateMatrix[2][2];
+//     if (threadIdx.x < 4)
+//     {
+//         int row = threadIdx.x / 2;
+//         int col = threadIdx.x % 2;
+//         sharedGateMatrix[row][col] = gateMatrix->data[row][col];
+//     }
+//     __shared__ DTYPE sharedLocalSv[2048];
+//     sharedLocalSv[p % 2048] = localSv->data[p][0];
+//     sharedLocalSv[(p | 1 << qidx) % 2048] = localSv->data[p | 1 << qidx][0];
+//     __syncthreads();
+
+//     if (idx < localSv->row / 2)
+//     {
+//         // int i = (idx / (1 << qidx)) * (1 << (qidx + 1));
+//         // int j = idx % (1 << qidx);
+//         // int p = i | j;
+//         DTYPE q0 = sharedLocalSv[p % 2048];
+//         DTYPE q1 = sharedLocalSv[(p | 1 << qidx) % 2048];
+//         sharedLocalSv[p % 2048] = cuCadd(cuCmul(sharedGateMatrix[0][0], q0), cuCmul(sharedGateMatrix[0][1], q1));
+//         sharedLocalSv[(p | 1 << qidx) % 2048] = cuCadd(cuCmul(sharedGateMatrix[1][0], q0), cuCmul(sharedGateMatrix[1][1], q1));
+//     }
+
+//     localSv->data[p][0] = sharedLocalSv[p % 2048];
+//     localSv->data[p | 1 << qidx][0] = sharedLocalSv[(p | 1 << qidx) % 2048];
+// }
+
 __global__ void SVSimForSingleQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Matrix<DTYPE> *localSv, int qidx)
 {
-    // int idx = threadIdx.x;
-    // int locallenSv = 1 << numLowQubits;
-    // for (int i = idx * locallenSv; i < (idx + 1) * locallenSv; i += (1 << (qidx + 1)))
-    //     for (int j = idx * locallenSv; j < idx * locallenSv + (1 << qidx); j++)
-    //     {
-    //         int p = i | j;
-    //         DTYPE q0 = localSv->data[p][0];
-    //         DTYPE q1 = localSv->data[p | 1 << qidx][0];
-    //         localSv->data[p][0] = cuCadd(cuCmul(gateMatrix->data[0][0], q0), cuCmul(gateMatrix->data[0][1], q1));
-    //         localSv->data[p | 1 << qidx][0] = cuCadd(cuCmul(gateMatrix->data[1][0], q0), cuCmul(gateMatrix->data[1][1], q1));
-    //     }
+    // 将 gateMatrix 加载到共享内存
+    __shared__ DTYPE sharedGateMatrix[2][2];
+    if (threadIdx.x < 4)
+    {
+        int row = threadIdx.x / 2;
+        int col = threadIdx.x % 2;
+        sharedGateMatrix[row][col] = gateMatrix->data[row][col];
+    }
+    __syncthreads();
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < localSv->row / 2)
@@ -145,8 +186,8 @@ __global__ void SVSimForSingleQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits,
         int p = i | j;
         DTYPE q0 = localSv->data[p][0];
         DTYPE q1 = localSv->data[p | 1 << qidx][0];
-        localSv->data[p][0] = cuCadd(cuCmul(gateMatrix->data[0][0], q0), cuCmul(gateMatrix->data[0][1], q1));
-        localSv->data[p | 1 << qidx][0] = cuCadd(cuCmul(gateMatrix->data[1][0], q0), cuCmul(gateMatrix->data[1][1], q1));
+        localSv->data[p][0] = cuCadd(cuCmul(sharedGateMatrix[0][0], q0), cuCmul(sharedGateMatrix[0][1], q1));
+        localSv->data[p | 1 << qidx][0] = cuCadd(cuCmul(sharedGateMatrix[1][0], q0), cuCmul(sharedGateMatrix[1][1], q1));
     }
 }
 
@@ -161,23 +202,16 @@ __global__ void SVSimForSingleQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits,
  */
 __global__ void SVSimForTwoQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Matrix<DTYPE> *localSv, int qlow, int qhigh)
 {
-    // int idx = threadIdx.x;
-    // int locallenSv = 1 << numLowQubits;
+    // 将 gateMatrix 加载到共享内存
+    __shared__ DTYPE sharedGateMatrix[4][4];
+    if (threadIdx.x < 16)
+    {
+        int row = threadIdx.x / 4;
+        int col = threadIdx.x % 4;
+        sharedGateMatrix[row][col] = gateMatrix->data[row][col];
+    }
+    __syncthreads();
 
-    // for (int i = idx * locallenSv; i < (idx + 1) * locallenSv; i += (1 << (qhigh + 1)))
-    //     for (int j = idx * locallenSv; j < idx * locallenSv + (1 << qhigh); j += 1 << (qlow + 1))
-    //         for (int k = idx * locallenSv; k < idx * locallenSv + (1 << qlow); k++)
-    //         {
-    //             int p = i | j | k;
-    //             DTYPE q0 = localSv->data[p][0];
-    //             DTYPE q1 = localSv->data[p | 1 << qlow][0];
-    //             DTYPE q2 = localSv->data[p | 1 << qhigh][0];
-    //             DTYPE q3 = localSv->data[p | 1 << qlow | 1 << qhigh][0];
-    //             localSv->data[p][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[0][0], q0), cuCmul(gateMatrix->data[0][1], q1)), cuCadd(cuCmul(gateMatrix->data[0][2], q2), cuCmul(gateMatrix->data[0][3], q3)));
-    //             localSv->data[p | 1 << qlow][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[1][0], q0), cuCmul(gateMatrix->data[1][1], q1)), cuCadd(cuCmul(gateMatrix->data[1][2], q2), cuCmul(gateMatrix->data[1][3], q3)));
-    //             localSv->data[p | 1 << qhigh][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[2][0], q0), cuCmul(gateMatrix->data[2][1], q1)), cuCadd(cuCmul(gateMatrix->data[2][2], q2), cuCmul(gateMatrix->data[2][3], q3)));
-    //             localSv->data[p | 1 << qlow | 1 << qhigh][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[3][0], q0), cuCmul(gateMatrix->data[3][1], q1)), cuCadd(cuCmul(gateMatrix->data[3][2], q2), cuCmul(gateMatrix->data[3][3], q3)));
-    //         }
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < localSv->row / 4)
     {
@@ -190,10 +224,11 @@ __global__ void SVSimForTwoQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Ma
         DTYPE q1 = localSv->data[p | 1 << qlow][0];
         DTYPE q2 = localSv->data[p | 1 << qhigh][0];
         DTYPE q3 = localSv->data[p | 1 << qlow | 1 << qhigh][0];
-        localSv->data[p][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[0][0], q0), cuCmul(gateMatrix->data[0][1], q1)), cuCadd(cuCmul(gateMatrix->data[0][2], q2), cuCmul(gateMatrix->data[0][3], q3)));
-        localSv->data[p | 1 << qlow][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[1][0], q0), cuCmul(gateMatrix->data[1][1], q1)), cuCadd(cuCmul(gateMatrix->data[1][2], q2), cuCmul(gateMatrix->data[1][3], q3)));
-        localSv->data[p | 1 << qhigh][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[2][0], q0), cuCmul(gateMatrix->data[2][1], q1)), cuCadd(cuCmul(gateMatrix->data[2][2], q2), cuCmul(gateMatrix->data[2][3], q3)));
-        localSv->data[p | 1 << qlow | 1 << qhigh][0] = cuCadd(cuCadd(cuCmul(gateMatrix->data[3][0], q0), cuCmul(gateMatrix->data[3][1], q1)), cuCadd(cuCmul(gateMatrix->data[3][2], q2), cuCmul(gateMatrix->data[3][3], q3)));
+
+        localSv->data[p][0] = cuCadd(cuCadd(cuCmul(sharedGateMatrix[0][0], q0), cuCmul(sharedGateMatrix[0][1], q1)), cuCadd(cuCmul(sharedGateMatrix[0][2], q2), cuCmul(sharedGateMatrix[0][3], q3)));
+        localSv->data[p | (1 << qlow)][0] = cuCadd(cuCadd(cuCmul(sharedGateMatrix[1][0], q0), cuCmul(sharedGateMatrix[1][1], q1)), cuCadd(cuCmul(sharedGateMatrix[1][2], q2), cuCmul(sharedGateMatrix[1][3], q3)));
+        localSv->data[p | (1 << qhigh)][0] = cuCadd(cuCadd(cuCmul(sharedGateMatrix[2][0], q0), cuCmul(sharedGateMatrix[2][1], q1)), cuCadd(cuCmul(sharedGateMatrix[2][2], q2), cuCmul(sharedGateMatrix[2][3], q3)));
+        localSv->data[p | (1 << qlow) | (1 << qhigh)][0] = cuCadd(cuCadd(cuCmul(sharedGateMatrix[3][0], q0), cuCmul(sharedGateMatrix[3][1], q1)), cuCadd(cuCmul(sharedGateMatrix[3][2], q2), cuCmul(sharedGateMatrix[3][3], q3)));
     }
 }
 
@@ -205,30 +240,39 @@ __global__ void SVSimForTwoQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Ma
  */
 __global__ void merge(Matrix<DTYPE> *sv, Matrix<DTYPE> *ptrOpmat)
 {
-    // printf("blockDim.x = %d, blockDim.y = %d \n", blockDim.x, blockDim.y);
+    int opmatSize = ptrOpmat->col;
+    // const int MAX_OPMAT_SIZE = 32;
+    // __shared__ DTYPE sharedOpmat[MAX_OPMAT_SIZE][MAX_OPMAT_SIZE];
 
-    // int idx = threadIdx.y * blockDim.x + threadIdx.x;
-    // // printf("idx = threadIdx.y * blockDim.x + threadIdx.x :: %d = %d * %d + %d  \n", idx, threadIdx.y , blockDim.x , threadIdx.x);
-    // DTYPE ans = make_cuDoubleComplex(0, 0);
-    // for (ll i = 0; i < ptrOpmat->col; i++)
-    // {
-    //     // DTYPE temp = cuCmul(ptrOpmat->data[threadIdx.y][i], sv->data[threadIdx.x + blockDim.x * i][0]);
-    //     ans = cuCadd(ans, cuCmul(ptrOpmat->data[threadIdx.y][i], sv->data[threadIdx.x + blockDim.x * i][0]));
-    //     // if (idx == 854)
-    //     // {
-    //     //     printf("idx=%d, ptrOpmat[%d][%lld] * sv[%lld] = %f + %fi\n", idx, threadIdx.y, i, threadIdx.x + blockDim.x * i, temp.x, temp.y);
-    //     // }
-    // }
+    // int row = threadIdx.x / opmatSize;
+    // int col = threadIdx.x % opmatSize;
+    // if (row < opmatSize && col < opmatSize)
+    //     sharedOpmat[row][col] = ptrOpmat->data[row][col];
+
+    // __syncthreads();
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int localSvLen = sv->row / ptrOpmat->col;
-    if (idx < sv->row)
+    int localSvLen = sv->row / opmatSize;
+    int totalThreadsNum = blockDim.x * gridDim.x;
+    // Calculate the number of elements each thread should process
+    int numElementsPerThread = (sv->row + totalThreadsNum - 1) / totalThreadsNum;
+
+    // Calculate the starting index for the current thread
+    int startIdx = idx * numElementsPerThread;
+
+    // Loop through the elements this thread is responsible for
+    for (int k = 0; k < numElementsPerThread; ++k)
     {
-        DTYPE ans = make_cuDoubleComplex(0, 0);
-        for (ll i = 0; i < ptrOpmat->col; i++)
+        int currentIdx = startIdx + k;
+
+        if (currentIdx < sv->row)
         {
-            ans = cuCadd(ans, cuCmul(ptrOpmat->data[idx / localSvLen][i], sv->data[idx % localSvLen + localSvLen * i][0]));
+            DTYPE ans = make_cuDoubleComplex(0, 0);
+            for (ll i = 0; i < opmatSize; i++)
+            {
+                ans = cuCadd(ans, cuCmul(ptrOpmat->data[currentIdx / localSvLen][i], sv->data[currentIdx % localSvLen + localSvLen * i][0]));
+            }
+            sv->data[currentIdx][0] = ans;
         }
-        sv->data[idx][0] = ans;
     }
 }

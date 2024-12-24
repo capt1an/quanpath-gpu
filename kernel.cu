@@ -2,7 +2,7 @@
 #include "device_launch_parameters.h"
 #include "cuquanpath.h"
 
-int numQubits = 13;
+int numQubits = 16;
 int numThreads = 32;
 
 int numHighQubits = log2(numThreads);		  // #high-order qubits
@@ -89,12 +89,13 @@ int main()
 	Matrix<DTYPE> hostSv(lenSv, 1);
 
 	// 模拟次数
-	int numSimulations = 10;
+	int numSimulations = 5;
 	// 存储模拟时间的向量
 	vector<double> simulationTimes;
 
 	for (int times = 0; times < numSimulations; ++times)
 	{
+		hostSv.zero(lenSv, 1);
 		for (int i = 0; i < numThreads; i++)
 		{
 			hostSv.data[i * ((1 << qc.numQubits) / numThreads) + i][0] = make_cuDoubleComplex(1.0 / sqrt(numThreads), 0);
