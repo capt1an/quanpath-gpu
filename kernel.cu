@@ -4,9 +4,10 @@
 
 int numQubits = 16;
 int numThreads = 32;
+int numDepths = 1000;
 
-int numHighQubits = log2(numThreads);		  // #high-order qubits
-int numLowQubits = numQubits - numHighQubits; // #low-order qubits
+int numHighQubits = log2(numThreads);		  // high-order qubits
+int numLowQubits = numQubits - numHighQubits; // low-order qubits
 ll lenSv = (1 << numQubits);				  // the length of the local state vector
 
 // Generate a separable quantum circuit
@@ -14,10 +15,48 @@ QCircuit separableqc()
 {
 
 	QCircuit qc(numQubits, "separable");
-
-	for (int layer = 0; layer < 1000; layer++)
+	qc.numLowQubits = numLowQubits;
+	for (int layer = 0; layer < numDepths; layer++)
 	{
 		if (layer % 5 == 0)
+		{
+			for (int i = numQubits - 1; i > numLowQubits; i -= 2)
+			{
+				qc.cx(i, i - 1);
+			}
+			for (int i = 1; i < numLowQubits; i += 2)
+			{
+				qc.cy(i, i - 1);
+			}
+		}
+		else if (layer % 5 == 1)
+		{
+			for (int i = 0; i < numQubits; i++)
+			{
+				if (i % 3 == 0)
+					qc.rx((double)(i + 1) / numQubits, i);
+				if (i % 3 == 1)
+					qc.ry((double)(i + 1) / numQubits, i);
+				if (i % 3 == 2)
+					qc.rz((double)(i + 1) / numQubits, i);
+			}
+		}
+		else if (layer % 5 == 2)
+		{
+
+			for (int i = 0; i < numQubits; i++)
+			{
+				if (i % 3 == 0)
+					qc.x(i);
+				if (i % 3 == 1)
+					qc.y(i);
+				if (i % 3 == 2)
+					qc.z(i);
+			}
+		}
+		else if (layer % 5 == 3)
+		{
+
 			for (int i = 0; i < numQubits; i++)
 			{
 				if (i >= numLowQubits) // 高阶部分
@@ -29,17 +68,8 @@ QCircuit separableqc()
 					qc.ry((double)(layer + 1) / 200.0, i);
 				}
 			}
-		else if (layer % 5 == 1)
-			for (int i = 0; i < numQubits; i++)
-			{
-				if (i % 3 == 0)
-					qc.rx((double)i / numQubits, i);
-				if (i % 3 == 1)
-					qc.ry((double)i / numQubits, i);
-				if (i % 3 == 2)
-					qc.rz((double)i / numQubits, i);
-			}
-		else if (layer % 5 == 2)
+		}
+		else
 		{
 			for (int i = numQubits - 1; i > numLowQubits; i -= 2)
 			{
@@ -47,32 +77,25 @@ QCircuit separableqc()
 			}
 			for (int i = 1; i < numLowQubits; i += 2)
 			{
-				qc.cy(i, i - 1);
-			}
-		}
-		else if (layer % 5 == 3)
-		{
-			for (int i = numQubits - 1; i > numLowQubits; i -= 2)
-			{
-				qc.swap(i, i - 1);
-			}
-			for (int i = 1; i < numLowQubits; i += 2)
-			{
 				qc.cz(i, i - 1);
 			}
 		}
-		else
-			for (int i = 0; i < numQubits; i++)
-			{
-				if (i % 3 == 0)
-					qc.x(i);
-				if (i % 3 == 1)
-					qc.y(i);
-				if (i % 3 == 2)
-					qc.z(i);
-			}
-		qc.barrier();
+		if(layer != numDepths - 1)
+			qc.barrier();
 	}
+
+	// qc.rz(0.7, 7);
+	// qc.h(6);
+	// qc.cz(5, 4);
+	// qc.x(3);
+	// qc.cx(2, 1);
+	// qc.rx(0.5, 0);
+	// qc.barrier();
+	// qc.cx(7, 6);
+	// qc.ry(0.6, 5);
+	// qc.cz(4, 1);
+	// qc.x(0);
+
 	return qc;
 }
 
@@ -103,8 +126,7 @@ int main()
 
 		// 获取开始时间
 		auto start = chrono::high_resolution_clock::now();
-
-		QuanPath(qc, hostSv, numThreads, numHighQubits, numLowQubits);
+		QuanPath(qc, hostSv, numThreads, qc.numDepths, numHighQubits, numLowQubits);
 
 		// 获取结束时间
 		auto end = chrono::high_resolution_clock::now();
@@ -115,6 +137,8 @@ int main()
 		cout << "Simulation " << times + 1 << " completed in " << duration.count() << " seconds." << endl;
 	}
 	double average = accumulate(simulationTimes.begin(), simulationTimes.end(), 0.0) / simulationTimes.size();
+	auto minIt = min_element(simulationTimes.begin(), simulationTimes.end());
 	cout << "Average: " << average << std::endl;
+	cout << "Min:" << *minIt << std::endl;
 	return 0;
 }

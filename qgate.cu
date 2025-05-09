@@ -1,12 +1,13 @@
 #include "qgate.h"
 
 QGate::QGate() {
-    gname = "NULL";
-    controlQubits = {};
-    targetQubits = {};
+    strncpy(gname, "NULL", sizeof(gname) - 1);
+    gname[sizeof(gname) - 1] = '\0';
+    numControlQubits = 0;
+    numTargetQubits = 0;
     gmat = nullptr;
+    theta = 0;
 }
-
 /**
  * @brief Construct a new QGate::QGate object, initialize the gate matrix with the given name
  *
@@ -14,13 +15,22 @@ QGate::QGate() {
  * @param controls_ control qubits
  * @param targets_ target qubits
  */
-QGate::QGate(string gname_, vector<int> controls_, vector<int> targets_) {
-    gname = gname_;
-    controlQubits = controls_;
-    targetQubits = targets_;
-    gmat = Matrix<DTYPE>::MatrixDict[gname];
-    if (gmat == nullptr) {
-        cout << "[ERROR] Gate " << gname << " not found in MatrixDict" << endl;
+QGate::QGate(const char* gname_, const int* controls_, int num_controls, const int* targets_, int num_targets) {
+    strncpy(gname, gname_, sizeof(gname) - 1);
+    gname[sizeof(gname) - 1] = '\0';
+    numControlQubits = num_controls;
+    theta = 0;
+    for (int i = 0; i < numControlQubits; ++i) {
+        controlQubits[i] = controls_[i];
+    }
+    numTargetQubits = num_targets;
+    for (int i = 0; i < numTargetQubits; ++i) {
+        targetQubits[i] = targets_[i];
+    }
+    if (Matrix<cuDoubleComplex>::MatrixDict.count(gname)) {
+        gmat = Matrix<cuDoubleComplex>::MatrixDict[gname];
+    } else {
+        std::cout << "[ERROR] Gate " << gname << " not found in MatrixDict" << std::endl;
         exit(1);
     }
 }
@@ -33,34 +43,42 @@ QGate::QGate(string gname_, vector<int> controls_, vector<int> targets_) {
  * @param targets_ target qubits
  * @param theta a parameter
  */
-QGate::QGate(string gname_, vector<int> controls_, vector<int> targets_, double theta) {
-    gname = gname_;
-    controlQubits = controls_;
-    targetQubits = targets_;
+QGate::QGate(const char* gname_, const int* controls_, int num_controls, const int* targets_, int num_targets, double theta) {
+    strncpy(this->gname, gname_, sizeof(this->gname) - 1);
+    this->gname[sizeof(this->gname) - 1] = '\0';
+    numControlQubits = num_controls;
+    this->theta = theta;
+    for (int i = 0; i < numControlQubits; ++i) {
+        controlQubits[i] = controls_[i];
+    }
+    numTargetQubits = num_targets;
+    for (int i = 0; i < numTargetQubits; ++i) {
+        targetQubits[i] = targets_[i];
+    }
 
-    string matkey = gname + to_string(theta);
-    gmat = Matrix<DTYPE>::MatrixDict[matkey];
-    if (gmat != nullptr) { // the gate matrix already exists
-        // cout << "[DEBUG] Matrix already exists: " << matkey << ", " << gmat << endl;
+    std::string matkey = std::string(this->gname) + std::to_string(theta);
+    if (Matrix<cuDoubleComplex>::MatrixDict.count(matkey)) {
+        gmat = Matrix<cuDoubleComplex>::MatrixDict[matkey];
         return;
     }
 
-    Matrix<DTYPE> mat;
-    if (gname == "RX") {
+    Matrix<cuDoubleComplex> mat(0, 0); // Initialize with invalid dimensions
+    if (std::string(this->gname) == "RX") {
+        // Assuming rotationX is a static method in Matrix
         mat.rotationX(theta);
     }
-    else if (gname == "RY") {
+    else if (std::string(this->gname) == "RY") {
         mat.rotationY(theta);
     }
-    else if (gname == "RZ") {
+    else if (std::string(this->gname) == "RZ") {
         mat.rotationZ(theta);
     }
     else {
-        cout << "[ERROR] Gate " << gname << " not implemented" << endl;
+        std::cout << "[ERROR] Gate " << this->gname << " not implemented for parameterized constructor" << std::endl;
         exit(1);
     }
-    Matrix<DTYPE>::MatrixDict[matkey] = make_shared<Matrix<DTYPE>>(move(mat));
-    gmat = Matrix<DTYPE>::MatrixDict[matkey];
+    Matrix<cuDoubleComplex>::MatrixDict[matkey] = std::make_shared<Matrix<cuDoubleComplex>>(std::move(mat));
+    gmat = Matrix<cuDoubleComplex>::MatrixDict[matkey];
 }
 
 /**
@@ -69,9 +87,17 @@ QGate::QGate(string gname_, vector<int> controls_, vector<int> targets_, double 
  * @param other
  */
 QGate::QGate(const QGate& other) {
-    gname = other.gname;
-    controlQubits = other.controlQubits;
-    targetQubits = other.targetQubits;
+    strncpy(gname, other.gname, sizeof(gname) - 1);
+    gname[sizeof(gname) - 1] = '\0';
+    numControlQubits = other.numControlQubits;
+    this->theta = other.theta;
+    for (int i = 0; i < numControlQubits; ++i) {
+        controlQubits[i] = other.controlQubits[i];
+    }
+    numTargetQubits = other.numTargetQubits;
+    for (int i = 0; i < numTargetQubits; ++i) {
+        targetQubits[i] = other.targetQubits[i];
+    }
     gmat = other.gmat;
 }
 
@@ -82,72 +108,56 @@ QGate::QGate(const QGate& other) {
  * @return QGate&
  */
 QGate& QGate::operator=(const QGate& other) {
-    gname = other.gname;
-    controlQubits = other.controlQubits;
-    targetQubits = other.targetQubits;
+    if (this == &other) return *this;
+    strncpy(gname, other.gname, sizeof(gname) - 1);
+    gname[sizeof(gname) - 1] = '\0';
+    numControlQubits = other.numControlQubits;
+    this->theta = other.theta;
+    for (int i = 0; i < numControlQubits; ++i) {
+        controlQubits[i] = other.controlQubits[i];
+    }
+    numTargetQubits = other.numTargetQubits;
+    for (int i = 0; i < numTargetQubits; ++i) {
+        targetQubits[i] = other.targetQubits[i];
+    }
     gmat = other.gmat;
     return *this;
 }
 
-// Return the number of input/output qubits of the gate
-int QGate::numQubits() {
-    return controlQubits.size() + targetQubits.size();
-}
+// // Return the number of input/output qubits of the gate
+// __host__ __device__ int QGate::numQubits() const {
+//     return numControlQubits + numTargetQubits;
+// }
 
-// Return the number of control qubits of the gate
-int QGate::numControls() {
-    return controlQubits.size();
-}
+// // Return the number of control qubits of the gate
+// __host__ __device__ int QGate::numControls() const {
+//     return numControlQubits;
+// }
 
-// Return the number of target qubits of the gate
-int QGate::numTargets() {
-    return targetQubits.size();
-}
+// // Return the number of target qubits of the gate
+// __host__ __device__ int QGate::numTargets() const {
+//     return numTargetQubits;
+// }
 
-// Check if the gate is an identity gate
-bool QGate::isIDE() {
-    return gname == "IDE";
-}
 
-// Check if the gate is a placeholder gate
-bool QGate::isMARK() {
-    return gname == "MARK";
-}
-
-// Check if the gate is a single-qubit gate
-bool QGate::isSingle() {
-    return gname != "IDE" && gname != "MARK" && controlQubits.size() == 0 && targetQubits.size() == 1;
-}
-
-// Check if the gate is a 2-qubit controlled gate
-bool QGate::is2QubitControlled() {
-    return gname != "MARK" && controlQubits.size() == 1 && targetQubits.size() == 1;
-}
-
-// Check if qubit[qid] is a control qubit of the gate
-bool QGate::isControlQubit(int qid) {
-    return find(controlQubits.begin(), controlQubits.end(), qid) != controlQubits.end();
-}
-
-// Check if qubit[qid] is a target qubit of the gate
-bool QGate::isTargetQubit(int qid) {
-    return gname != "IDE" && gname != "MARK" && find(targetQubits.begin(), targetQubits.end(), qid) != targetQubits.end();
-}
-
-// Print the gate information
-void QGate::print() {
-    cout << "===== Gate: " << gname << " =====" << endl;
-    cout << "Control qubits: ";
-    for (vector<int>::size_type i = 0; i < controlQubits.size(); i++) {
-        cout << controlQubits[i] << " ";
+// Print the gate information (host-only)
+__host__ void QGate::print() const {
+    std::cout << "===== Gate: " << gname << " =====" << std::endl;
+    std::cout << "Control qubits: ";
+    for (int i = 0; i < numControlQubits; ++i) {
+        std::cout << controlQubits[i] << " ";
     }
-    cout << endl;
-    cout << "Target qubits: ";
-    for (vector<int>::size_type i = 0; i < targetQubits.size(); i++) {
-        cout << targetQubits[i] << " ";
+    std::cout << std::endl;
+    std::cout << "Target qubits: ";
+    for (int i = 0; i < numTargetQubits; ++i) {
+        std::cout << targetQubits[i] << " ";
     }
-    cout << endl;
-    gmat->print();
+    std::cout << std::endl;
+    if (gmat) {
+        gmat->print();
+    } else {
+        std::cout << "Gate matrix is null." << std::endl;
+    }
 }
 
 // Destructor
