@@ -17,6 +17,65 @@ QCircuit::QCircuit(int numQubits_, string name_)
     name = name_;
 }
 
+cudaError_t QCircuit::copyQCircuitToDevice()
+{
+    int totalGates = numDepths * numQubits;
+    QGateDevice *h_gate_array = new QGateDevice[totalGates];
+
+    for (int depth = 0; depth < numDepths; ++depth)
+    {
+        for (int qid = 0; qid < numQubits; ++qid)
+        {
+            QGate &src = gates[depth][qid];
+            QGateDevice &dst = h_gate_array[depth * numQubits + qid];
+
+            dst.gname_id = mapNameToID(src.gname);
+            dst.numAmps = 1 << src.numTargets();
+            dst.numControlQubits = src.numControls();
+            dst.numTargetQubits = src.numTargets();
+            dst.theta = src.theta;
+            for (ll idx = 0; idx < dst.numAmps; ++idx)
+            {
+                ll stride = 0;
+                for (int j = 0; j < src.targetQubits.size(); ++j)
+                {
+                    if (idx & (1 << j))
+                    { // if the j-th bit of idx is 1
+                        stride += (1 << src.targetQubits[j]);
+                    }
+                }
+                dst.strides[idx] = stride;
+            }
+
+            if (src.numControls() == 0)
+                dst.ctrlmask = 0;
+            else
+                dst.ctrlmask = 1 << src.controlQubits[0];
+        }
+    }
+
+    // 在 GPU 上分配内存
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_gate_array, sizeof(QGateDevice) * totalGates));
+
+    // 拷贝到 GPU
+    HANDLE_CUDA_ERROR(cudaMemcpy(d_gate_array, h_gate_array, sizeof(QGateDevice) * totalGates, cudaMemcpyHostToDevice));
+
+    // 清理 host 临时缓冲区
+    delete[] h_gate_array;
+
+    return cudaSuccess;
+}
+
+cudaError_t QCircuit::freeQCircuitMemory()
+{
+    if (d_gate_array != nullptr)
+    {
+        cudaFree(d_gate_array);
+        d_gate_array = nullptr; // 避免悬空指针
+    }
+    return cudaSuccess;
+}
+
 //
 // Single-qubit gates
 //
@@ -32,8 +91,7 @@ void QCircuit::h(int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("H", nullptr, 0, targets, 1);
+    gates[numDepths - 1][qid] = QGate("H", {}, {qid});
 }
 
 /**
@@ -47,8 +105,7 @@ void QCircuit::x(int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("X", nullptr, 0, targets, 1);
+    gates[numDepths - 1][qid] = QGate("X", {}, {qid});
 }
 
 /**
@@ -61,8 +118,7 @@ void QCircuit::y(int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("Y", nullptr, 0, targets, 1);
+    gates[numDepths - 1][qid] = QGate("Y", {}, {qid});
 }
 
 /**
@@ -76,8 +132,7 @@ void QCircuit::z(int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("Z", nullptr, 0, targets, 1);
+    gates[numDepths - 1][qid] = QGate("Z", {}, {qid});
 }
 
 /**
@@ -92,8 +147,7 @@ void QCircuit::rx(double theta, int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("RX", nullptr, 0, targets, 1, theta);
+    gates[numDepths - 1][qid] = QGate("RX", {}, {qid}, theta);
 }
 
 /**
@@ -108,8 +162,7 @@ void QCircuit::ry(double theta, int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("RY", nullptr, 0, targets, 1, theta);
+    gates[numDepths - 1][qid] = QGate("RY", {}, {qid}, theta);
 }
 
 /**
@@ -124,8 +177,7 @@ void QCircuit::rz(double theta, int qid)
     {
         add_level();
     }
-    int targets[] = {qid};
-    gates[numDepths - 1][qid] = QGate("RZ", nullptr, 0, targets, 1, theta);
+    gates[numDepths - 1][qid] = QGate("RZ", {}, {qid}, theta);
 }
 
 //
@@ -150,14 +202,11 @@ void QCircuit::cx(int ctrl, int targ)
             break;
         }
     }
-    int controls[] = {ctrl};
-    int targets[] = {targ};
     for (int i = start; i <= end; ++i)
     {
-        int mark_targets[] = {start, end};
-        gates[numDepths - 1][i] = QGate("MARK", controls, 1, mark_targets, 2);
+        gates[numDepths - 1][i] = QGate("MARK", {ctrl}, {targ});
     }
-    gates[numDepths - 1][targ] = QGate("CX", controls, 1, targets, 1);
+    gates[numDepths - 1][targ] = QGate("CX", {ctrl}, {targ});
 }
 
 /**
@@ -178,14 +227,11 @@ void QCircuit::cy(int ctrl, int targ)
             break;
         }
     }
-    int controls[] = {ctrl};
-    int targets[] = {targ};
     for (int i = start; i <= end; ++i)
     {
-        int mark_targets[] = {start, end};
-        gates[numDepths - 1][i] = QGate("MARK", controls, 1, mark_targets, 2);
+        gates[numDepths - 1][i] = QGate("MARK", {ctrl}, {targ});
     }
-    gates[numDepths - 1][targ] = QGate("CY", controls, 1, targets, 1);
+    gates[numDepths - 1][targ] = QGate("CY", {ctrl}, {targ});
 }
 
 /**
@@ -206,14 +252,11 @@ void QCircuit::cz(int ctrl, int targ)
             break;
         }
     }
-    int controls[] = {ctrl};
-    int targets[] = {targ};
     for (int i = start; i <= end; ++i)
     {
-        int mark_targets[] = {start, end};
-        gates[numDepths - 1][i] = QGate("MARK", controls, 1, mark_targets, 2);
+        gates[numDepths - 1][i] = QGate("MARK", {ctrl}, {targ});
     }
-    gates[numDepths - 1][targ] = QGate("CZ", controls, 1, targets, 1);
+    gates[numDepths - 1][targ] = QGate("CZ", {ctrl}, {targ});
 }
 
 /**
@@ -234,61 +277,11 @@ void QCircuit::swap(int qid1, int qid2)
             break;
         }
     }
-    int targets[] = {start, end};
     for (int i = start; i <= end; ++i)
     {
-        gates[numDepths - 1][i] = QGate("MARK", nullptr, 0, targets, 2);
+        gates[numDepths - 1][i] = QGate("MARK", {}, {start, end});
     }
-    gates[numDepths - 1][end] = QGate("SWAP", nullptr, 0, targets, 2);
-}
-
-void QCircuit::copyGatesToDevice()
-{
-    int totalGates = numDepths * numLowQubits;
-    QGateDevice *h_gate_array = new QGateDevice[totalGates];
-
-    for (int depth = 0; depth < numDepths; ++depth)
-    {
-        for (int qid = 0; qid < numLowQubits; ++qid)
-        {
-            const QGate &src = gates[depth][qid];
-            QGateDevice &dst = h_gate_array[depth * numLowQubits + qid];
-
-            dst.gname_id = mapNameToID(src.gname);
-            dst.numAmps = 1 << src.numTargetQubits;
-
-            dst.numControlQubits = src.numControlQubits;
-            dst.numTargetQubits = src.numTargetQubits;
-            dst.theta = src.theta;
-
-            for (ll idx = 0; idx < dst.numAmps; ++idx)
-            {
-                ll stride = 0;
-                for (int j = 0; j < src.numTargetQubits; ++j)
-                {
-                    if (idx & (1 << j))
-                    { // if the j-th bit of idx is 1
-                        stride += (1 << src.targetQubits[j]);
-                    }
-                }
-                dst.strides[idx] = stride;
-            }
-
-            if (src.controlQubits == 0)
-                dst.ctrlmask = 0;
-            else
-                dst.ctrlmask = 1 << src.controlQubits[0];
-        }
-    }
-
-    // 在 GPU 上分配内存
-    cudaMalloc(&d_gate_array, sizeof(QGateDevice) * totalGates);
-
-    // 拷贝到 GPU
-    cudaMemcpy(d_gate_array, h_gate_array, sizeof(QGateDevice) * totalGates, cudaMemcpyHostToDevice);
-
-    // 清理 host 临时缓冲区
-    delete[] h_gate_array;
+    gates[numDepths - 1][end] = QGate("SWAP", {}, {start, end});
 }
 
 /**
@@ -361,32 +354,33 @@ void QCircuit::printInfo()
  */
 void QCircuit::add_level()
 {
-    if (numDepths >= MAX_DEPTHS)
-    {
-        std::cerr << "[ERROR] Maximum circuit depth reached (" << MAX_DEPTHS << ")" << std::endl;
-        return;
-    }
+    vector<QGate> level;
     for (int i = 0; i < numQubits; ++i)
     {
-        int targets[] = {i};
-        gates[numDepths][i] = QGate("IDE", nullptr, 0, targets, 1);
+        level.push_back(QGate("IDE", {}, {i}));
     }
+    gates.push_back(level);
     numDepths++;
 }
 
-int mapNameToID(const char *name)
+QCircuit::~QCircuit()
 {
-    if (strcmp(name, "IDE") == 0 || strcmp(name, "MARK") == 0)
+    freeQCircuitMemory();
+}
+
+int mapNameToID(const std::string &name)
+{
+    if (name == "IDE" || name == "MARK")
         return 1;
-    if (strcmp(name, "H") == 0)
+    if (name == "H")
         return 2;
-    if (strcmp(name, "X") == 0 || strcmp(name, "CX") == 0 || strcmp(name, "RX") == 0)
+    if (name == "X" || name == "CX" || name == "RX")
         return 3;
-    if (strcmp(name, "Y") == 0 || strcmp(name, "CY") == 0 || strcmp(name, "RY") == 0)
+    if (name == "Y" || name == "CY" || name == "RY")
         return 4;
-    if (strcmp(name, "Z") == 0 || strcmp(name, "CZ") == 0 || strcmp(name, "RZ") == 0)
+    if (name == "Z" || name == "CZ" || name == "RZ")
         return 5;
-    if (strcmp(name, "SWAP") == 0 || strcmp(name, "CSWAP") == 0)
+    if (name == "SWAP" || name == "CSWAP")
         return 6;
     return 0;
 }

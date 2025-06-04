@@ -1,115 +1,185 @@
 #include "cuquanpath.h"
 
-void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numBlocks, int numDepths, int numHighQubits, int numLowQubits)
+void QuanPath(QCircuit &qc)
 {
-    // 在const memory 初始化门矩阵
-    initGateMatricesInConstMemory();
+    CudaUtils cudaUtils;
+    // 将量子线路存入GPU内存
+    qc.copyQCircuitToDevice();
 
-    // 将线路放入GPU的内存空间
-    // QGateDevice *d_gate_array = nullptr;
-    // copyGatesToDevice(d_gate_array, qc, numLowQubits);
-    qc.copyGatesToDevice();
+    // 在const memory初始化门矩阵
+    HANDLE_CUDA_ERROR(initGateMatricesInConstMemory());
 
-    // 为设备分配状态向量的内存空间
-    Matrix<DTYPE> *deviceSv;
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(deviceSv, hostSv));
+    // 分配初始状态向量|00..0>的内存空间
+    DTYPE *deviceSv;
+    ll stateVectorLen = 1 << qc.numQubits;
+    size_t stateVectorBytes = stateVectorLen * sizeof(DTYPE);
+    HANDLE_CUDA_ERROR(cudaMalloc(&deviceSv, stateVectorBytes));
 
-    // auto start = chrono::high_resolution_clock::now();
-    Matrix<DTYPE> Opmat = highOMSim(qc, numHighQubits);
+    // 分配每一层的高阶矩阵的内存空间
+    DTYPE *highMatrices;
+    ll highMatrixElementNum = (1 << qc.numHighQubits) * (1 << qc.numHighQubits);
+    size_t highMatrixBytes = highMatrixElementNum * qc.numDepths * sizeof(DTYPE);
+    HANDLE_CUDA_ERROR(cudaMalloc(&highMatrices, highMatrixBytes));
+
+    // 高阶计算每一层的张量积
+    dim3 blockDim(1 << qc.numHighQubits, 1 << qc.numHighQubits);
+    // cudaUtils.startTiming("highTensorProduct");
+    highTensorProduct<<<qc.numDepths, blockDim>>>(qc.d_gate_array, highMatrices, qc.numDepths, qc.numQubits, qc.numHighQubits);
+
+    // 矩阵乘法
+    DTYPE *highFinalMatrix;
+    size_t highFinalMatrixBytes = highMatrixElementNum * sizeof(DTYPE);
+    cudaMalloc(&highFinalMatrix, highFinalMatrixBytes);
+    cudaMemcpy(highFinalMatrix, highMatrices, highFinalMatrixBytes, cudaMemcpyDeviceToDevice);
+
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+    const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+
+    DTYPE *tempMat;
+    cudaMalloc(&tempMat, highMatrixElementNum * sizeof(cuDoubleComplex));
+
+    int N = 1 << qc.numHighQubits;
+    for (int i = 1; i < qc.numDepths; i++)
+    {
+        // A = highFinalMatrix, B = highMatrices[i], C = tempMat
+        cublasZgemm(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            N, N, N,
+            &alpha,
+            highFinalMatrix, N,
+            highMatrices + i * N * N, N,
+            &beta,
+            tempMat, N);
+        // Swap pointers
+        DTYPE *tmp = highFinalMatrix;
+        highFinalMatrix = tempMat;
+        tempMat = tmp;
+    }
+    // 释放 cuBLAS 句柄
+    cublasDestroy(handle);
+    cudaDeviceSynchronize();
+
+    // cudaUtils.stopTiming();
+
+    // 检查高阶结果
+    // cuDoubleComplex *hostResult = (cuDoubleComplex *)malloc(highMatrixElementNum * sizeof(cuDoubleComplex));
+    // cudaMemcpy(hostResult, highFinalMatrix, highMatrixElementNum * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    // printf("Final high matrix result:\n");
+    // for (int row = 0; row < N; row++)
+    // {
+    //     for (int col = 0; col < N; col++)
+    //     {
+    //         cuDoubleComplex val = hostResult[row * N + col];
+    //         printf("(% .3f%+.3fi) ", cuCreal(val), cuCimag(val));
+    //     }
+    //     printf("\n");
+    // }
 
     // Step 2. Local SVSim for gates on low-order qubits
+    int threadPerBlock = 1 << (qc.numLowQubits - 1);
+    assert(threadPerBlock <= MAX_THREAD_PER_BLOCK);
+    int blockPerGrid = (stateVectorLen + threadPerBlock - 1) / (threadPerBlock * 2);
+    size_t sharedMemSize = (stateVectorLen / blockPerGrid) * sizeof(DTYPE);
+    assert(sharedMemSize <= MAX_SHARED_MEMORY);
 
-    int threadPerBlock = 1 << (numLowQubits - 1);
-    assert(threadPerBlock <= 1024);
-    int blockPerGrid = (hostSv.row + threadPerBlock - 1) / (threadPerBlock * 2);
-    size_t sharedMemSize = (hostSv.row / blockPerGrid) * sizeof(DTYPE);
-    assert(sharedMemSize <= 49152);
-    SVSim<<<blockPerGrid, threadPerBlock, sharedMemSize>>>(qc.d_gate_array, deviceSv, hostSv.row / blockPerGrid, numDepths, numLowQubits);
-
+    // cudaUtils.startTiming("SVSim");
+    SVSim<<<blockPerGrid, threadPerBlock, sharedMemSize>>>(qc.d_gate_array, deviceSv, stateVectorLen / blockPerGrid, qc.numDepths, qc.numQubits, qc.numLowQubits);
     cudaDeviceSynchronize();
+    // cudaUtils.stopTiming();
 
+    
     // Step 3. Final merge that requires communication
-
-    Matrix<DTYPE> *ptrOpmat;
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::allocateDeviceMemory(ptrOpmat, Opmat));
-
-    merge<<<blockPerGrid, 128>>>(deviceSv, ptrOpmat);
+    int localSvLen = stateVectorLen / (1 << qc.numHighQubits);
+    int numMergeThreads = blockPerGrid * 128;
+    int numElementsPerThread = (stateVectorLen + numMergeThreads - 1) / numMergeThreads;
+    // cudaUtils.startTiming("merge");
+    merge<<<blockPerGrid, 128>>>(deviceSv, highFinalMatrix, stateVectorLen, 1 << qc.numHighQubits, localSvLen, numElementsPerThread);
     cudaDeviceSynchronize();
 
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::copyDeviceToHost(deviceSv, hostSv));
+    // cudaUtils.stopTiming();
+    // cudaUtils.writeDeviceStateVectorToFile(deviceSv, stateVectorLen);
 
     // 释放设备内存
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(deviceSv));
-    HANDLE_CUDA_ERROR(Matrix<DTYPE>::freeDeviceMemory(ptrOpmat));
-
-    hostSv.writeToTextFile("sv.txt");
+    HANDLE_CUDA_ERROR(cudaFree(deviceSv));
+    HANDLE_CUDA_ERROR(cudaFree(highMatrices));
+    HANDLE_CUDA_ERROR(cudaFree(highFinalMatrix));
+    HANDLE_CUDA_ERROR(cudaFree(tempMat));
 }
 
-/**
- * @brief [TODO] Conduct OMSim for high-order qubits using a thread
- *
- * @param qc a quantum circuit
- * @param numHighQubits the number of high-order qubits
- */
-Matrix<DTYPE> highOMSim(QCircuit &qc, int numHighQubits)
+__global__ void highTensorProduct(QGateDevice *d_gate_array, DTYPE *ptrOpmat, int numDepths, int numQubits, int numHighQubits)
 {
-    int numLowQubits = qc.numQubits - numHighQubits;
-    Matrix<DTYPE> opmat, levelmat;
-    opmat.identity(1 << numHighQubits);
-    levelmat.identity(2);
-    for (int j = 0; j < qc.numDepths; ++j)
+    int depthIdx = blockIdx.x;
+    int row = threadIdx.y;
+    int col = threadIdx.x;
+    int matrixSize = 1 << numHighQubits;
+    // if (depthIdx == 0)
+    //     printf("depthIdx=%d, row=%d, col=%d \n", depthIdx, row, col);
+
+    __shared__ DTYPE sharedGates[4][2 * 2];
+    if (row == 0 && col == 0)
     {
-        int qid = qc.numQubits - 1;
-
-        // get the highest gate matrix
-        while (qc.gates[j][qid].isMARK() && qc.gates[j][qid].targetQubits[0] >= numLowQubits)
+        for (int qid = numQubits - 1; qid >= numQubits - numHighQubits; qid--)
         {
-            // Skip the pseudo placeholder MARK gates placed at control positions
-            // when the target gate is applied to high-order qubits
-            // If the target gate is applied to low-order qubits, MARK should be regarded as IDE
-            --qid;
-        }
-        // [TODO] Calculate the operation matrix for gates applied to high-order qubits
-        // [HINT] We have modified getCompleteMatrix to deal with MARK
-        //        In this assignment, MARK is associated with an identity matrix
-        // cout << "[TODO] Calculate the operation matrix for gates applied to high-order qubits" << endl;
-        // MPI_Abort(MPI_COMM_WORLD, 1);
-        levelmat = move(getCompleteMatrix(qc.gates[j][qid]));
-        for (int i = qid - 1; i >= numLowQubits; --i)
-        {
-            if (qc.gates[j][i].isMARK() && qc.gates[j][i].targetQubits[0] >= numLowQubits)
+            int gateIdx = depthIdx * numQubits + qid;
+            QGateDevice gate = d_gate_array[gateIdx];
+            // printf("gate[%d].thera = %f",gateIdx, gate.theta );
+            const DTYPE *gateMat = get_matrix(gate);
+            for (int i = 0; i < 4; i++)
             {
-                continue;
+                sharedGates[numQubits - qid - 1][i] = gateMat[i];
+                // printf("sharedGates[%d][%d] = (%f, %f)\n", numQubits - qid - 1, i, cuCreal(sharedGates[numQubits - qid - 1][i]), cuCimag(sharedGates[numQubits - qid - 1][i]));
             }
-            Matrix<DTYPE> tmpmat = move(getCompleteMatrix(qc.gates[j][i]));
-            levelmat = move(levelmat.tensorProduct(tmpmat));
         }
-        opmat = move(levelmat * opmat);
-        // ///////////////////////////////////////////////////////////////////////////
     }
-    return opmat;
+    __syncthreads();
+
+    DTYPE temp = make_cuDoubleComplex(1, 0);
+    for (int i = numHighQubits - 1; i >= 0; i--)
+    {
+        int bitR = (row >> i) & 1;
+        int bitC = (col >> i) & 1;
+        temp = myCmul(sharedGates[numHighQubits - 1 - i][bitR * 2 + bitC], temp);
+    }
+    ptrOpmat[depthIdx * (matrixSize * matrixSize) + row * matrixSize + col] = temp;
+    // __syncthreads();
+    // if (depthIdx == 0)
+    // {
+    //     if (threadIdx.y < matrixSize && threadIdx.x < matrixSize)
+    //     {
+    //         int r = threadIdx.y;
+    //         int c = threadIdx.x;
+    //         DTYPE val = ptrOpmat[depthIdx * (matrixSize * matrixSize) + r * matrixSize + c];
+    //         printf("Opmat[%d][%d] = (%f, %f)\n", r, c, cuCreal(val), cuCimag(val));
+    //     }
+    // }
+
+    return;
 }
 
-__global__ void SVSim(QGateDevice *d_gate_array, Matrix<DTYPE> *deviceSv, int numStatePerBlock, int numDepths, int numLowQubits)
+__global__ void SVSim(QGateDevice *d_gate_array, DTYPE *deviceSv, int numStatePerBlock, int numDepths, int numQubits, int numLowQubits)
 {
-    // int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // printf("idx=%d, blockIdx=%d, threadIdx=%d \n", idx, blockIdx.x, threadIdx.x);
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     extern __shared__ DTYPE shared_state[];
     for (int i = threadIdx.x; i < numStatePerBlock; i += blockDim.x)
     {
-        shared_state[i] = deviceSv->data[blockIdx.x * numStatePerBlock + i][0];
+        shared_state[i] = deviceSv[blockIdx.x * numStatePerBlock + i];
     }
 
+    if (idx == 0)
+        shared_state[0] = make_cuDoubleComplex(1, 0);
     __syncthreads();
-    
+
     for (int lev = 0; lev < numDepths; ++lev)
     {
         for (int qid = 0; qid < numLowQubits; ++qid)
         {
-            int gate_idx = lev * numLowQubits + qid;
+            int gate_idx = lev * numQubits + qid;
             QGateDevice gate = d_gate_array[gate_idx];
-            
+
             if (gate.gname_id == 1)
                 continue;
 
@@ -136,7 +206,6 @@ __global__ void SVSim(QGateDevice *d_gate_array, Matrix<DTYPE> *deviceSv, int nu
                     const DTYPE *gateMat = get_matrix(gate);
                     shared_state[i0] = myCadd(myCmul(gateMat[0], state[0]), myCmul(gateMat[1], state[1]));
                     shared_state[i1] = myCadd(myCmul(gateMat[2], state[0]), myCmul(gateMat[3], state[1]));
-                    
                 }
             }
             __syncthreads();
@@ -146,7 +215,7 @@ __global__ void SVSim(QGateDevice *d_gate_array, Matrix<DTYPE> *deviceSv, int nu
     // 将共享内存写回全局内存./
     for (int i = threadIdx.x; i < numStatePerBlock; i += blockDim.x)
     {
-        deviceSv->data[blockIdx.x * numStatePerBlock + i][0] = shared_state[i];
+        deviceSv[blockIdx.x * numStatePerBlock + i] = shared_state[i];
     }
 }
 
@@ -169,7 +238,6 @@ __device__ bool isLegalControlPattern(int qid, QGateDevice &gate)
     }
     return true;
 }
-
 
 __global__ void SVSimForSingleQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Matrix<DTYPE> *localSv, int qidx)
 {
@@ -243,53 +311,46 @@ __global__ void SVSimForTwoQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Ma
  * @param sv the state vector
  * @param ptrOpmat the pointer to the high-order operation matrix
  */
-__global__ void merge(Matrix<DTYPE> *sv, Matrix<DTYPE> *ptrOpmat)
+__global__ void merge(DTYPE *deviceSv, DTYPE *ptrOpmat, int svLen, int highMatrixSize, int localSvLen, int numElementsPerThread)
 {
-    int opmatSize = ptrOpmat->col;
-    // const int MAX_OPMAT_SIZE = 32;
-    // __shared__ DTYPE sharedOpmat[MAX_OPMAT_SIZE][MAX_OPMAT_SIZE];
-
-    // int row = threadIdx.x / opmatSize;
-    // int col = threadIdx.x % opmatSize;
-    // if (row < opmatSize && col < opmatSize)
-    //     sharedOpmat[row][col] = ptrOpmat->data[row][col];
-
-    // __syncthreads();
-
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int localSvLen = sv->row / opmatSize;
-    int totalThreadsNum = blockDim.x * gridDim.x;
+    // int localSvLen = sv->row / opmatSize;
+    // int totalThreadsNum = blockDim.x * gridDim.x;
     // Calculate the number of elements each thread should process
-    int numElementsPerThread = (sv->row + totalThreadsNum - 1) / totalThreadsNum;
+    // int numElementsPerThread = (sv->row + totalThreadsNum - 1) / totalThreadsNum;
 
     // Calculate the starting index for the current thread
     int startIdx = idx * numElementsPerThread;
+
+    // printf("idx = % d , startIdx = %d;\n",idx, startIdx);
 
     // Loop through the elements this thread is responsible for
     for (int k = 0; k < numElementsPerThread; ++k)
     {
         int currentIdx = startIdx + k;
 
-        if (currentIdx < sv->row)
+        if (currentIdx < svLen)
         {
             DTYPE ans = make_cuDoubleComplex(0, 0);
-            for (ll i = 0; i < opmatSize; i++)
+            for (ll i = 0; i < highMatrixSize; i++)
             {
-                ans = cuCadd(ans, cuCmul(ptrOpmat->data[currentIdx / localSvLen][i], sv->data[currentIdx % localSvLen + localSvLen * i][0]));
+                ans = cuCadd(ans, cuCmul(ptrOpmat[(currentIdx / localSvLen) * highMatrixSize + i], deviceSv[currentIdx % localSvLen + localSvLen * i]));
             }
-            sv->data[currentIdx][0] = ans;
+            deviceSv[currentIdx] = ans;
+            // printf("deviceSv[%d] = %f + %f i;",currentIdx, ans.x, ans.y );
         }
+        __syncthreads();
     }
 }
 
-__device__ cuDoubleComplex myCmul(cuDoubleComplex a, cuDoubleComplex b)
+__device__ __forceinline__ cuDoubleComplex myCmul(cuDoubleComplex a, cuDoubleComplex b)
 {
     return make_cuDoubleComplex(
         a.x * b.x - a.y * b.y,
         a.x * b.y + a.y * b.x);
 }
 
-__device__ cuDoubleComplex myCadd(cuDoubleComplex a, cuDoubleComplex b)
+__device__ __forceinline__ cuDoubleComplex myCadd(cuDoubleComplex a, cuDoubleComplex b)
 {
     return make_cuDoubleComplex(
         a.x + b.x,
@@ -343,7 +404,7 @@ cudaError_t initGateMatricesInConstMemory()
     return cudaSuccess;
 }
 
-__device__ const DTYPE *get_matrix(QGateDevice &gate)
+__device__ __forceinline__ const DTYPE *get_matrix(QGateDevice &gate)
 {
     if (gate.theta != 0)
     {

@@ -38,7 +38,7 @@ target_compile_options(MyCUDAProject PRIVATE
 )
 
 # 链接 custatevec 和 cutensornet 库
-target_link_libraries(MyCUDAProject custatevec cutensornet)
+target_link_libraries(MyCUDAProject custatevec cutensornet cublas)
 
 # 链接 CUDA 运行时库
 target_link_libraries(MyCUDAProject ${CUDA_LIBRARIES})

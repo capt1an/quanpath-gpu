@@ -13,16 +13,16 @@ ll lenSv = (1 << numQubits);				  // the length of the local state vector
 // Generate a separable quantum circuit
 QCircuit separableqc()
 {
-
 	QCircuit qc(numQubits, "separable");
 	qc.numLowQubits = numLowQubits;
+	qc.numHighQubits = numHighQubits;
 	for (int layer = 0; layer < numDepths; layer++)
 	{
 		if (layer % 5 == 0)
 		{
 			for (int i = numQubits - 1; i > numLowQubits; i -= 2)
 			{
-				qc.cx(i, i - 1);
+				qc.h(i);
 			}
 			for (int i = 1; i < numLowQubits; i += 2)
 			{
@@ -73,7 +73,7 @@ QCircuit separableqc()
 		{
 			for (int i = numQubits - 1; i > numLowQubits; i -= 2)
 			{
-				qc.cx(i, i - 1);
+				qc.h(i);
 			}
 			for (int i = 1; i < numLowQubits; i += 2)
 			{
@@ -84,32 +84,13 @@ QCircuit separableqc()
 			qc.barrier();
 	}
 
-	// qc.rz(0.7, 7);
-	// qc.h(6);
-	// qc.cz(5, 4);
-	// qc.x(3);
-	// qc.cx(2, 1);
-	// qc.rx(0.5, 0);
-	// qc.barrier();
-	// qc.cx(7, 6);
-	// qc.ry(0.6, 5);
-	// qc.cz(4, 1);
-	// qc.x(0);
-
 	return qc;
 }
 
 int main()
 {
-	// Initialize the matrix dictionary
-	Matrix<DTYPE>::initMatrixDict();
-
 	// Initialize a quantum circuit
 	QCircuit qc = separableqc();
-
-	// Initialize the local state vector for each process
-	// [NOTE] The initial state vector is not |00..0>
-	Matrix<DTYPE> hostSv(lenSv, 1);
 
 	// 模拟次数
 	int numSimulations = 5;
@@ -118,22 +99,15 @@ int main()
 
 	for (int times = 0; times < numSimulations; ++times)
 	{
-		hostSv.zero(lenSv, 1);
-		for (int i = 0; i < numThreads; i++)
-		{
-			hostSv.data[i * ((1 << qc.numQubits) / numThreads) + i][0] = make_cuDoubleComplex(1.0 / sqrt(numThreads), 0);
-		}
-
 		// 获取开始时间
 		auto start = chrono::high_resolution_clock::now();
-		QuanPath(qc, hostSv, numThreads, qc.numDepths, numHighQubits, numLowQubits);
+		QuanPath(qc);
 
 		// 获取结束时间
 		auto end = chrono::high_resolution_clock::now();
 
 		chrono::duration<double> duration = end - start;
 		simulationTimes.push_back(duration.count());
-		// cout << "Svsim simulation completed in " << duration.count() << " seconds." << endl;
 		cout << "Simulation " << times + 1 << " completed in " << duration.count() << " seconds." << endl;
 	}
 	double average = accumulate(simulationTimes.begin(), simulationTimes.end(), 0.0) / simulationTimes.size();

@@ -2,8 +2,6 @@
 
 #include "qgate.h"
 
-#define MAX_DEPTHS 1024 // 假设的最大电路深度
-#define MAX_QUBITS 20   // 假设的最大 qubit 数量
 
 class QCircuit
 {
@@ -11,14 +9,16 @@ public:
     int numQubits;
     int numDepths;
     int numLowQubits;
-    QGate gates[MAX_DEPTHS][MAX_QUBITS];
+    int numHighQubits;
+    vector<vector<QGate>> gates;
     string name;
     QGateDevice* d_gate_array = nullptr;
-
 
     QCircuit();
     QCircuit(int numQubits_, string name_ = "qcircuit");
 
+    cudaError_t copyQCircuitToDevice();
+    cudaError_t freeQCircuitMemory();
     //
     // Single-qubit gates
     //
@@ -38,7 +38,6 @@ public:
     void cz(int ctrl, int targ);
     void swap(int qid1, int qid2);
 
-    void copyGatesToDevice();
 
     //
     // Other operations on quantum circuits
@@ -49,7 +48,9 @@ public:
     void printInfo();
 
     void add_level();
+
+    ~QCircuit();
 };
 
 
-int mapNameToID(const char *name);
+int mapNameToID(const std::string& name);

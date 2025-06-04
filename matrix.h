@@ -3,6 +3,7 @@
 #include <bits/stdc++.h>
 #include <cuda_runtime.h>
 #include <cuComplex.h>
+#include "cublas_v2.h"
 #include "helper.hpp"
 using namespace std;
 
@@ -17,7 +18,7 @@ private:
 public:
     ll row, col;
     T **data;
-    static map<string, shared_ptr<Matrix>> MatrixDict; // A global matrix dictionary
+    // static map<string, shared_ptr<Matrix>> MatrixDict; // A global matrix dictionary
 
     //
     // Constructors
@@ -28,10 +29,11 @@ public:
     Matrix(const Matrix &matrx); // Copy constructor
     Matrix(Matrix &&matrx);      // Move constructor
 
-    static cudaError_t allocateDeviceMemory(Matrix<DTYPE> *&deviceMatrix, const Matrix<DTYPE> &hostMatrix);
-    static cudaError_t copyDeviceToHost(Matrix<DTYPE> *deviceMatrix, Matrix<DTYPE> &hostMatrix);
-    static cudaError_t freeDeviceMemory(Matrix<DTYPE> *deviceMatrix);
-    static cudaError_t copyHostToDevice(Matrix<DTYPE> &hostMatrix, Matrix<DTYPE> *deviceMatrix);
+    // static cudaError_t allocateDeviceMemory(Matrix<DTYPE> *&deviceMatrix, const Matrix<DTYPE> &hostMatrix);
+    // static cudaError_t copyDeviceToHost(Matrix<DTYPE> *deviceMatrix, Matrix<DTYPE> &hostMatrix);
+    // static cudaError_t freeDeviceMemory(Matrix<DTYPE> *deviceMatrix);
+    // static cudaError_t copyHostToDevice(Matrix<DTYPE> &hostMatrix, Matrix<DTYPE> *deviceMatrix);
+    
     //
     // Operations
     //

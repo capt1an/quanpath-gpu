@@ -1,7 +1,10 @@
 #pragma once
 
-#include "omsim.h"
+#include "qcircuit.h"
+#include "utils.h"
 
+#define MAX_SHARED_MEMORY 49152
+#define MAX_THREAD_PER_BLOCK 1024
 // 在常量内存中定义门矩阵
 /*映射关系
 "IDE" 	1
@@ -25,7 +28,7 @@ __constant__ DTYPE d_SWAP[16];   // 4x4
  * @param numWorkers the number of distributed working processes
  * @param myRank the MPI rank of the current process
  */
-void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numThreads, int numDepths, int numHighQubits, int numLowQubits);
+void QuanPath(QCircuit &qc);
 
 /**
  * @brief [TODO] Conduct OMSim for high-order qubits using a thread
@@ -33,10 +36,11 @@ void QuanPath(QCircuit &qc, Matrix<DTYPE> &hostSv, int numThreads, int numDepths
  * @param qc a quantum circuit
  * @param numHighQubits the number of high-order qubits
  */
-Matrix<DTYPE> highOMSim(QCircuit &qc, int numHighQubits);
+// Matrix<DTYPE> highOMSim(QCircuit &qc, int numHighQubits);
 
-__global__ void SVSim(QGateDevice *d_gate_array, Matrix<DTYPE> *deviceSv, int numStatePerBlock, int numDepths, int numLowQubits);
+__global__ void highTensorProduct(QGateDevice *d_gate_array,DTYPE *ptrOpmat, int numDepths, int numQubits,int numHighQubits);
 
+__global__ void SVSim(QGateDevice *d_gate_array, DTYPE *deviceSv, int numStatePerBlock, int numDepths, int numQubits, int numLowQubits);
 
 /**
  * @brief Conduct SVSim for gate on single qubit
@@ -65,18 +69,16 @@ __global__ void SVSimForTwoQubit(Matrix<DTYPE> *gateMatrix, int numLowQubits, Ma
  * @param sv the state vector
  * @param ptrOpmat the pointer to the high-order operation matrix
  */
-__global__ void merge(Matrix<DTYPE> *sv, Matrix<DTYPE> *ptrOpmat);
-
-
-
-__device__ cuDoubleComplex myCmul(cuDoubleComplex a, cuDoubleComplex b);
-
-__device__ cuDoubleComplex myCadd(cuDoubleComplex a, cuDoubleComplex b);
+__global__ void merge(DTYPE *deviceSv, DTYPE *ptrOpmat, int svLen, int highMatrixSize, int localSvLen, int numElementsPerThread);
 
 cudaError_t initGateMatricesInConstMemory();
 
 cudaError_t copyGatesToDevice(QGateDevice* d_gate_array, QCircuit& qc, int numLowQubits);
 
-__device__ const DTYPE *get_matrix(QGateDevice &gate);
+__device__ __forceinline__ cuDoubleComplex myCmul(cuDoubleComplex a, cuDoubleComplex b);
 
-__device__ bool isLegalControlPattern(int qid, QGateDevice &gate);
+__device__ __forceinline__ cuDoubleComplex myCadd(cuDoubleComplex a, cuDoubleComplex b);
+
+__device__ __forceinline__ const DTYPE *get_matrix(QGateDevice &gate);
+
+__device__ __forceinline__ bool isLegalControlPattern(int qid, QGateDevice &gate);
